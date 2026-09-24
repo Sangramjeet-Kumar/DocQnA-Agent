@@ -1,0 +1,2 @@
+# data/.gitkeep — keeps the data/ folder tracked in git even when empty.
+# Drop your PDF files here, then run:  python src/ingest.py --pdf_dir data/

@@ -8,7 +8,11 @@ Usage (standalone test, needs indexes already built):
 """
 
 import os
+import warnings
 from pathlib import Path
+
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="langchain")
+
 from dotenv import load_dotenv
 
 load_dotenv()

@@ -1,8 +1,8 @@
 """
-retrieve.py — build and return the hybrid EnsembleRetriever.
+retrieve.py — load indexes from disk, run hybrid retrieval, return top-k chunks.
 
-This module is imported by both agent.py and app.py.
-It never loads documents; it only loads the pre-built indexes from disk.
+EnsembleRetriever was removed from langchain 1.x. We implement RRF ourselves —
+it's ~15 lines, you can explain every line, and the logic is cleaner.
 
 Usage (standalone test):
     python src/retrieve.py "What is the retry policy?"
@@ -10,12 +10,14 @@ Usage (standalone test):
 
 import os
 import pickle
+import warnings
 from pathlib import Path
-from dotenv import load_dotenv
 
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="langchain")
+
+from dotenv import load_dotenv
 from langchain_community.vectorstores import FAISS
 from langchain_community.retrievers import BM25Retriever
-from langchain.retrievers import EnsembleRetriever
 
 load_dotenv()
 
@@ -24,7 +26,7 @@ FAISS_DIR = ROOT / "faiss_index"
 BM25_PATH = ROOT / "bm25_index" / "bm25.pkl"
 
 
-# ── Embedding factory (mirrors ingest.py — must stay in sync) ─────────────────
+# ── Embedding factory (must match ingest.py exactly) ──────────────────────────
 def _get_embeddings():
     provider = os.getenv("EMBEDDING_PROVIDER", "local").lower()
     if provider == "openai":
@@ -34,87 +36,91 @@ def _get_embeddings():
     return HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
 
-# ── Individual retriever loaders ──────────────────────────────────────────────
-def _load_faiss_retriever(k: int):
-    """
-    Load the persisted FAISS index from disk and wrap it as a retriever.
-    allow_dangerous_deserialization is required by LangChain when loading from
-    a local pickle — we own the file so this is safe.
-    """
+# ── Index loaders ─────────────────────────────────────────────────────────────
+def _load_faiss(k: int):
     if not FAISS_DIR.exists():
-        raise FileNotFoundError(
-            f"FAISS index not found at {FAISS_DIR}. Run src/ingest.py first."
-        )
-    embeddings = _get_embeddings()
-    vectorstore = FAISS.load_local(
+        raise FileNotFoundError(f"FAISS index missing at {FAISS_DIR}. Run ingest.py first.")
+    vs = FAISS.load_local(
         str(FAISS_DIR),
-        embeddings,
-        allow_dangerous_deserialization=True,
+        _get_embeddings(),
+        allow_dangerous_deserialization=True,  # we built this file ourselves
     )
-    return vectorstore.as_retriever(search_kwargs={"k": k})
+    return vs.as_retriever(search_kwargs={"k": k})
 
 
-def _load_bm25_retriever(k: int):
+def _load_bm25(k: int):
     if not BM25_PATH.exists():
-        raise FileNotFoundError(
-            f"BM25 index not found at {BM25_PATH}. Run src/ingest.py first."
-        )
+        raise FileNotFoundError(f"BM25 index missing at {BM25_PATH}. Run ingest.py first.")
     with open(BM25_PATH, "rb") as f:
-        bm25_retriever = pickle.load(f)
-    bm25_retriever.k = k   # override k after loading
-    return bm25_retriever
+        ret = pickle.load(f)
+    ret.k = k
+    return ret
+
+
+# ── Reciprocal Rank Fusion ────────────────────────────────────────────────────
+def _rrf_merge(results_a: list, results_b: list, weight_a=0.5, weight_b=0.5, k_const=60) -> list:
+    """
+    Merge two ranked lists with Reciprocal Rank Fusion.
+
+    For each document at rank r in a list, its RRF contribution is:
+        weight * 1 / (r + k_const)
+
+    k_const=60 is the standard value from the original RRF paper (Cormack 2009).
+    It dampens the sharp score difference between rank 1 and rank 2.
+
+    Documents are keyed by page_content to detect duplicates across the two lists.
+    The final list is sorted by descending total RRF score.
+    """
+    scores: dict[str, float] = {}   # key: page_content  →  value: accumulated score
+    doc_map: dict[str, object] = {} # key: page_content  →  the Document object
+
+    for rank, doc in enumerate(results_a):
+        key = doc.page_content
+        scores[key] = scores.get(key, 0.0) + weight_a * (1.0 / (rank + k_const))
+        doc_map[key] = doc
+
+    for rank, doc in enumerate(results_b):
+        key = doc.page_content
+        scores[key] = scores.get(key, 0.0) + weight_b * (1.0 / (rank + k_const))
+        doc_map[key] = doc
+
+    # Sort by score descending; return Document objects in merged order
+    sorted_keys = sorted(scores, key=lambda k: scores[k], reverse=True)
+    return [doc_map[k] for k in sorted_keys]
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
-def get_retriever(k: int | None = None) -> EnsembleRetriever:
-    """
-    Return a hybrid EnsembleRetriever that runs FAISS (dense) and BM25 (sparse)
-    in parallel and merges results with Reciprocal Rank Fusion (RRF).
-
-    EnsembleRetriever weight=[0.5, 0.5] gives equal vote to both retrievers.
-    RRF formula: score = Σ 1/(rank + 60)  — classic fusion, robust to outliers.
-
-    Why equal weights?
-    - Dense wins on paraphrase / synonym queries.
-    - BM25 wins on exact tokens (error codes, function names, section IDs).
-    - 0.5/0.5 lets both contribute; you can tune after seeing eval results.
-    """
-    per_retriever_k = k or int(os.getenv("RETRIEVER_K", 5))
-
-    faiss_ret = _load_faiss_retriever(per_retriever_k)
-    bm25_ret = _load_bm25_retriever(per_retriever_k)
-
-    # EnsembleRetriever de-duplicates by page_content hash before returning.
-    ensemble = EnsembleRetriever(
-        retrievers=[faiss_ret, bm25_ret],
-        weights=[0.5, 0.5],
-    )
-    return ensemble
-
-
 def retrieve(query: str, top_k: int | None = None) -> list:
     """
-    Run the hybrid retriever for a query; return at most top_k Documents.
+    Run FAISS (dense) and BM25 (sparse) retrievers in parallel, merge with RRF,
+    return the top_k documents.
 
-    The EnsembleRetriever may return up to 2×k candidates before dedup;
-    we slice to top_k (from .env TOP_K or the caller's argument).
+    Why two retrievers?
+    - FAISS wins on paraphrase / synonym queries (semantic similarity).
+    - BM25 wins on exact tokens: error codes, function names, section IDs.
+    - RRF combines both without requiring score normalisation between the two.
     """
+    per_k  = int(os.getenv("RETRIEVER_K", 5))
     final_k = top_k or int(os.getenv("TOP_K", 6))
-    retriever = get_retriever()
-    docs = retriever.invoke(query)
-    return docs[:final_k]
+
+    faiss_ret = _load_faiss(per_k)
+    bm25_ret  = _load_bm25(per_k)
+
+    faiss_docs = faiss_ret.invoke(query)   # dense semantic results
+    bm25_docs  = bm25_ret.invoke(query)    # sparse keyword results
+
+    merged = _rrf_merge(faiss_docs, bm25_docs)
+    return merged[:final_k]
 
 
 # ── Standalone test ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import sys
-
     query = " ".join(sys.argv[1:]) or "What is this document about?"
     print(f"\nQuery: {query}\n")
-
     results = retrieve(query)
     for i, doc in enumerate(results, 1):
-        src = doc.metadata.get("source", "unknown")
+        src  = Path(doc.metadata.get("source", "unknown")).name
         page = doc.metadata.get("page", "?")
         print(f"[{i}] {src} (page {page})")
         print(f"     {doc.page_content[:200].strip()}\n")

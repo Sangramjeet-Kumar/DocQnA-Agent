@@ -4,7 +4,62 @@ This file is updated after every prompt. It records what was built, why each dec
 
 ---
 
-## Step 1 — Project Scaffold + Full Pipeline (this prompt)
+## Step 2 — Install Dependencies + Import Fixes (this prompt)
+
+### What was built / fixed
+
+| Action | Detail |
+|--------|--------|
+| Created `.venv` | `python -m venv .venv` |
+| Installed all deps | `pip install -r requirements.txt` (torch 124 MB, ~5 min first time) |
+| Added `sentence-transformers` to requirements | Needed for `HuggingFaceEmbeddings` (local MiniLM) |
+| Created `data/` + `data/.gitkeep` | Folder for user PDFs, tracked in git while empty |
+| Fixed `ingest.py` import | `langchain.text_splitter` → `langchain_text_splitters` (moved in langchain 1.x) |
+| Fixed `retrieve.py` entirely | `EnsembleRetriever` removed from langchain 1.x — replaced with our own RRF merge |
+| Added `warnings.filterwarnings` | Suppresses `langchain-community` deprecation noise in all src files |
+
+### What broke and why
+
+**`langchain.retrievers.EnsembleRetriever`** — langchain 1.4.x removed the `retrievers` submodule. `EnsembleRetriever` is not in `langchain_community` either (its exports list is empty). **Fix:** wrote our own `_rrf_merge()` — 15 lines, fully explainable, no framework dependency.
+
+**`langchain.text_splitter`** — moved to the standalone `langchain_text_splitters` package in langchain 1.x. **Fix:** updated import in `ingest.py`.
+
+### RRF merge — line-by-line explanation
+
+```python
+def _rrf_merge(results_a, results_b, weight_a=0.5, weight_b=0.5, k_const=60):
+    scores = {}   # accumulates weighted RRF score per unique chunk
+    doc_map = {}  # maps page_content → Document object (to avoid duplication)
+
+    for rank, doc in enumerate(results_a):          # iterate FAISS results
+        key = doc.page_content                       # unique key = text content
+        scores[key] = scores.get(key, 0.0) + weight_a * (1.0 / (rank + k_const))
+        # rank+60: dampens rank-1 vs rank-2 gap (standard RRF constant)
+        doc_map[key] = doc
+
+    for rank, doc in enumerate(results_b):          # same for BM25 results
+        key = doc.page_content
+        scores[key] = scores.get(key, 0.0) + weight_b * (1.0 / (rank + k_const))
+        # if doc appeared in FAISS too, its score INCREASES (fusion reward)
+        doc_map[key] = doc
+
+    sorted_keys = sorted(scores, key=lambda k: scores[k], reverse=True)
+    return [doc_map[k] for k in sorted_keys]        # return docs in merged rank order
+```
+
+### Verified working imports
+
+```
+langchain_community.vectorstores.FAISS                  ✅
+langchain_community.retrievers.BM25Retriever            ✅
+langchain_community.document_loaders.PyPDFLoader        ✅
+langchain_text_splitters.RecursiveCharacterTextSplitter ✅
+langchain_community.embeddings.HuggingFaceEmbeddings    ✅
+```
+
+---
+
+
 
 ### What was built
 

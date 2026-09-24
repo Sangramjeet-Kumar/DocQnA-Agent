@@ -17,5 +17,8 @@ pypdf>=4.0.0
 # UI
 streamlit>=1.35.0
 
+# Embeddings (local path — no API key needed)
+sentence-transformers>=3.0.0
+
 # Utilities
 python-dotenv>=1.0.0

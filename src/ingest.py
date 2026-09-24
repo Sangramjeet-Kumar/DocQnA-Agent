@@ -15,8 +15,11 @@ import argparse
 from pathlib import Path
 from dotenv import load_dotenv
 
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="langchain")
+
 from langchain_community.document_loaders import PyPDFLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter  # moved in langchain 1.x
 from langchain_community.vectorstores import FAISS
 from langchain_community.retrievers import BM25Retriever
 
