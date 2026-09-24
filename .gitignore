@@ -1,0 +1,25 @@
+# environment
+.env
+
+# FAISS persisted index
+faiss_index/
+
+# BM25 serialised index
+bm25_index/
+
+# Uploaded PDFs (add your own under data/ if you want to version them)
+data/*.pdf
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Streamlit
+.streamlit/
+
+# OS
+.DS_Store
+Thumbs.db

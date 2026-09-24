@@ -1,0 +1,21 @@
+# Core LangChain stack
+langchain>=0.2.0
+langchain-community>=0.2.0
+langchain-openai>=0.1.0          # also covers Groq via langchain-groq
+
+# LLM providers (choose one via .env)
+langchain-groq>=0.1.0            # free tier – recommended for dev
+openai>=1.0.0                    # needed if OPENAI_API_KEY is set
+
+# Retrieval
+faiss-cpu>=1.8.0
+rank-bm25>=0.2.2
+
+# Document loading
+pypdf>=4.0.0
+
+# UI
+streamlit>=1.35.0
+
+# Utilities
+python-dotenv>=1.0.0
